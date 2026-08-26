@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from sequence import Sequence
+from .sequence import Sequence
 import xxhash
 import numpy as np
 
@@ -68,7 +68,7 @@ class BlockManager:
 
     def _find_longest_prefix(self, seq: Sequence):
         """Given a sequence, finds the longest cached prefix"""
-        token_ids = seq.token_ids()
+        token_ids = seq.token_ids
         prefix = -1
         blocks = []
 

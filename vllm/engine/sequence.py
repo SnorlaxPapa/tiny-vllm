@@ -1,19 +1,29 @@
 
 
 class Sequence:
-    def __init__(self, prompt, token_ids):
+
+    block_size=4
+
+    def __init__(self, token_ids):
         self.block_list = []
-        self.prompt = prompt
         self.token_ids = token_ids
         self.num_hashed_tokens = 0
         self.num_scheduled_tokens = len(token_ids)
         self.num_computed_tokens = 0
+        self.num_tokens = len(token_ids)
 
     def __len__(self):
         return len(self.token_ids)
-
 
     def reset(self):
         self.block_list.clear()
         self.num_hashed_tokens = 0
         self.num_computed_tokens = 0
+
+    def block(self, i):
+        assert 0 <= i < self.num_blocks
+        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
+
+    @property
+    def num_blocks(self):
+        return (self.num_tokens + self.block_size - 1) // self.block_size
