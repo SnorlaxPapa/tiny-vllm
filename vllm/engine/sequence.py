@@ -1,14 +1,26 @@
+from enum import Enum, auto
+from copy import copy
+from itertools import count
+
+
+class SequenceStatus(Enum):
+        WAITING = auto()
+        RUNNING = auto()
+        FINISHED = auto()
 
 
 class Sequence:
 
     block_size=4
+    counter = count()
 
     def __init__(self, token_ids):
+        self.seq_id = next(Sequence.counter)
         self.block_list = []
-        self.token_ids = token_ids
+        self.token_ids = copy(token_ids)
         self.num_hashed_tokens = 0
-        self.num_scheduled_tokens = len(token_ids)
+        self.status = SequenceStatus.WAITING
+        self.num_scheduled_tokens = 0
         self.num_computed_tokens = 0
         self.num_tokens = len(token_ids)
 

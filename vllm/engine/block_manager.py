@@ -33,6 +33,7 @@ class BlockManager:
 
     @staticmethod
     def get_hash(token_ids: list[int], previous_hash: int = -1):
+        """rolling hash of our token ids"""
         h = xxhash.xxh64()
         if previous_hash != -1:
             h.update(previous_hash.to_bytes(8, "little"))
@@ -91,11 +92,8 @@ class BlockManager:
 
         return blocks
 
-
-    def allocate(self, seq: Sequence):
-        """Given longest number of cached blocks, allocate new blocks for the rest"""
-        assert not seq.block_list
-
+    def can_allocate(self, seq: Sequence):
+        """check if we have enough blocks to allocate given a sequence"""
         #allocate cached prefix
         cached_blocks = self._find_longest_prefix(seq)
         cached_tokens = len(cached_blocks) * self.block_size
@@ -107,8 +105,18 @@ class BlockManager:
         )   
 
         blocks_needed = (uncached_tokens + self.block_size - 1) // self.block_size
+        if blocks_needed > len(self.free_block_ids) - inactive_cached_blocks: 
+            return (-1, -1)
+        return cached_blocks, blocks_needed
 
-        if blocks_needed > len(self.free_block_ids) - inactive_cached_blocks: return -1
+
+    def allocate(self, seq: Sequence):
+        """Given longest number of cached blocks, allocate new blocks for the rest"""
+        assert not seq.block_list
+
+        cached_blocks, blocks_needed = self.can_allocate(seq)
+        if cached_blocks == -1: return -1
+        cached_tokens = len(cached_blocks) * self.block_size
 
         for block_id in cached_blocks:
             seq.block_list.append(block_id)
@@ -151,6 +159,7 @@ class BlockManager:
 
 
     def deallocate(self, seq: Sequence):
+        """deallocate blocks for a given sequence"""
         for block_id in reversed(seq.block_list): #reverse to allow earlier cached blocks to live longer
             block = self.blocks[block_id]
             assert block.ref_count > 0
@@ -161,5 +170,19 @@ class BlockManager:
 
         seq.reset()
 
+    def can_append(self, seq: Sequence):
+        """check if we can add a new KV slot for given sequence"""
+        blocks_needed = (len(seq) + self.block_size - 1) // self.block_size - len(seq.block_list)
+        if blocks_needed > len(self.free_block_ids): return False
+        return True
 
+    def may_append(self, seq: Sequence):
+        """add a new slot if required for kv cache of our last token"""
+        blocks_needed = (len(seq) + self.block_size - 1) // self.block_size - len(seq.block_list)
+        if blocks_needed == 0: return
+
+        #we decode token by token (for now)
+        assert blocks_needed == 1
+        new_block = self._get_free_block()
+        seq.block_list.append(new_block)
 
