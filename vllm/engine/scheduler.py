@@ -13,6 +13,7 @@ class Scheduler:
         self.block_size = config.kv_cache_block_size
         self.waiting = deque([])
         self.running = deque([])
+        Sequence.block_size = self.block_size
 
 
     def preempt(self, seq: Sequence):
@@ -24,10 +25,10 @@ class Scheduler:
 
     def schedule(self):
         """for simplicity, i utilize a homogenous scheduler """
-        scheduled_sequence = []
+        scheduled_sequences = []
         batched_tokens = 0
 
-        while len(scheduled_sequence) < self.max_num_seq and self.waiting:
+        while len(scheduled_sequences) < self.max_num_seq and self.waiting:
             curr = self.waiting[0]
             remaining = self.max_num_batch_tokens - batched_tokens
             if remaining <= 0: break
@@ -52,13 +53,13 @@ class Scheduler:
                 curr.status = SequenceStatus.RUNNING
                 self.waiting.popleft()
                 self.running.append(curr)
-            scheduled_sequence.append(curr)
+            scheduled_sequences.append(curr)
 
-        if scheduled_sequence:
-            return scheduled_sequence, True
+        if scheduled_sequences:
+            return scheduled_sequences, True
 
         #no prefill, we run for decode
-        while self.running and len(scheduled_sequence) < self.max_num_seq:
+        while self.running and len(scheduled_sequences) < self.max_num_seq:
             curr = self.running.popleft()
             while self.running and not self.block_manager.can_append(curr):
                 self.preempt(self.running.pop())
@@ -70,8 +71,26 @@ class Scheduler:
 
             curr.num_scheduled_tokens = 1
             self.block_manager.may_append(curr)
-            scheduled_sequence.append(curr)
+            scheduled_sequences.append(curr)
 
-        self.running.extendleft(reversed(scheduled_sequence))
+        self.running.extendleft(reversed(scheduled_sequences))
 
-        return scheduled_sequence, False
+        return scheduled_sequences, False
+
+    def postprocess(self, scheduled_sequences: list[Sequence], output_tokens: list[int], is_prefill: bool):
+        """remove any sequences that have completed their runs"""
+        for seq, token in zip(scheduled_sequences, output_tokens):
+            seq.num_computed_tokens += seq.num_scheduled_tokens
+            seq.num_scheduled_tokens = 0
+
+            self.block_manager.hash_blocks(seq)
+
+            if is_prefill and seq.num_computed_tokens != len(seq): continue #skip appending decoded token for chunks
+            seq.append_token(token)
+
+            reached_completed = not seq.ignore_eos and seq.last_token == self.eos
+            reached_limit = seq.num_completion_tokens == seq.max_tokens
+            if reached_completed or reached_limit:
+                seq.status = SequenceStatus.FINISHED
+                self.block_manager.deallocate(seq)
+                self.running.remove(seq)
