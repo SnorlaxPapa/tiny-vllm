@@ -13,6 +13,7 @@ class Config:
         enforce_eager: bool = False,
         kv_cache_block_size: int = 256,
         num_kvcache_blocks: int = -1,
+        eos: int = -1,
     ):
         self.model = model
         self.max_num_batch_tokens = max_num_batch_tokens
@@ -22,6 +23,7 @@ class Config:
         self.enforce_eager = enforce_eager
         self.kv_cache_block_size = kv_cache_block_size
         self.num_kvcache_blocks = num_kvcache_blocks
+        self.eos = eos
 
         assert os.path.isdir(self.model)
         assert self.kv_cache_block_size % 256 == 0

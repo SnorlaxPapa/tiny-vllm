@@ -21,6 +21,7 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
+
     def schedule(self):
         """for simplicity, i utilize a homogenous scheduler """
         scheduled_sequence = []
