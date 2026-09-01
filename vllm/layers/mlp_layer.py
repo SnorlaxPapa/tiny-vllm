@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn 
 
 
-class Qwen2MLP(nn.Module):
+class GatedLinear(nn.Module):
 
     def __init__(self, config):
         super().__init__()

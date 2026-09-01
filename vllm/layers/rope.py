@@ -1,59 +1,66 @@
-import torch 
-import torch.nn as nn
+from functools import lru_cache
+import torch
+from torch import nn
+
+def apply_rotary_emb(
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+):
+    """splits x into pairs (x_j, x_(j + d/2)) and applies rotary embedding"""
+    x1, x2 = torch.chunk(x.float(), 2, dim=-1) 
+    y1 = x1 * cos - x2 * sin
+    y2 = x2 * cos + x1 * sin
+    return torch.cat((y1, y2), dim=-1).to(x.dtype)
 
 
+class RotaryEmbedding(nn.Module):
 
-class Qwen2RotaryEmbedding(nn.Module):
-
-    def __init__(self, config, device=None):
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+    ):
         super().__init__()
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-
-        self.config = config
-
-        inv_freq, self.attention_scaling = self.compute_default_rope_parameters(self.config, device)
-        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
-        self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
-
-
-    @staticmethod
-    def compute_default_rope_parameters(config, device=None, **kwargs):
-        """gets the inverse frequencies of theta j"""
-        base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-
-        attention_factor = 1.0 #1.0 for default
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-
-        return inv_freq.to(device), attention_factor
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device) #(B, d/2, 1)
-        position_ids_expanded = position_ids[:, None, :].float() #(B, 1, S)
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False): #we disable autocast as rope is sensitive to changes in mtheta
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        self.head_size = head_size
+        assert rotary_dim == head_size
+        inv_freq = 1.0 / (
+            base ** (
+                torch.arange(0, rotary_dim, 2, dtype=torch.float)
+                / rotary_dim
+            )
+        ) #(d/2, )
+        t = torch.arange(max_position_embeddings, dtype=torch.float) #(seq_len, )
+        freqs = torch.outer(t, inv_freq) #(seq_len, d/2)
+        cos = freqs.cos()
+        sin = freqs.sin() 
+        cache = torch.cat((cos, sin), dim=-1).unsqueeze_(1) #(seq_len, 1, d)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
 
 
-def rotate_half(x):
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    @torch.compile
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor
+    ):
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1) #(seq_len, 1, d)
+        query = apply_rotary_emb(query, cos, sin)
+        key = apply_rotary_emb(key, cos, sin)
 
-    return torch.cat((-x2, x1), dim=-1)
+        return query, key
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-
-    return q_embed, k_embed
+@lru_cache(1) #ensures rope object referenced is the same
+def get_rope(
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: float,
+):
+    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
+    return rotary_emb
