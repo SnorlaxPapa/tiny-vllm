@@ -5,7 +5,7 @@ class RMSNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.eps = config.rms_norm_eps
-        self.weight = nn.Parameter(torch.ones(config.hidde_size))
+        self.weight = nn.Parameter(torch.ones(config.hidden_size))
 
 
     @torch.compile
@@ -17,7 +17,7 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         # normalize and scale
         x = x / rms * self.weight
-        # add residual
+        
         return x.to(original_dtype), residual.to(original_dtype)
 
     

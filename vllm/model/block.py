@@ -5,17 +5,34 @@ from vllm.layers.norm import RMSNorm
 from vllm.layers.attention import Qwen2Attention
 
 class Block(nn.Module):
-    
+    """ block structure rms norm -> attention -> rms norm (with residual) -> gated linear unit"""
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.gated_linear = GatedLinear(config)
-        self.rmsnorm = RMSNorm(config)
-        self.attention = Qwen2Attention(config)
+        self.mlp = GatedLinear(config)
+        self.input_layernorm = RMSNorm(config)
+        self.post_attention_layernorm = RMSNorm(config)
+        self.self_attn = Qwen2Attention(config)
 
 
-    def forward(self, x):
-        pass
+    @torch.compile
+    def forward(self, x, positions):
+        #attention 
+        residual = x
+        hidden_states = self.input_layernorm(x, None)
+        output = self.self_attn(hidden_states, positions)
+
+        #mlp
+        x, residual = self.post_attention_layernorm(output, residual) #allows fusion of rms norm and res (both row ops)
+        x = self.mlp(x)
+        x = x + residual #hard to fuse here cuz glu is matmul and res is addition by row
+
+        return x
+        
+
+
+
+        
 
 
 
