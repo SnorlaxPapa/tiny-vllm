@@ -5,16 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm.utils.context import get_context
+from vllm.layers.rope import get_rope
 
-import inspect
-from flash_attn import flash_attn_varlen_func
 
-print(inspect.signature(flash_attn_varlen_func))
 
 @triton.jit
 def store_kv_inner(
     k,
     v, 
+    k_token_stride,
+    v_token_stride,
     H: tl.constexpr,
     D: tl.constexpr,
     k_cache,
@@ -31,10 +31,10 @@ def store_kv_inner(
     cols = tl.arange(0, D)
     matrix_offset = rows[:, None] * D + cols[None, :]
 
-    k_idx = k + H * D * idx
+    k_idx = k + k_token_stride * idx
     k_idx = k_idx + matrix_offset
 
-    v_idx = v + H * D * idx
+    v_idx = v + v_token_stride * idx
     v_idx = v_idx + matrix_offset
 
     k = tl.load(k_idx)
@@ -56,8 +56,6 @@ def store_kv_inner(
     tl.store(v_cache_idx, v)
 
 
-
-
 def store_kv_cache(
     key: torch.Tensor, #(T, H, D)
     value: torch.Tensor, #(T, H, D)
@@ -66,9 +64,13 @@ def store_kv_cache(
     slot_mapping: torch.Tensor, #(T, )
 ):
     T, H, D = key.shape
+    k_token_stride, v_token_stride = key.stride(0), value.stride(0)
+
     store_kv_inner[(T, 1, 1)](
         k=key,
         v=value, 
+        k_token_stride=k_token_stride,
+        v_token_stride=v_token_stride,
         H=H,
         D=D,
         k_cache=k_cache,
@@ -77,8 +79,7 @@ def store_kv_cache(
     )
 
 
-    
-class attentionInterface(nn.Module):
+class AttentionInterface(nn.Module):
 
     def __init__(
         self,
@@ -127,3 +128,78 @@ class attentionInterface(nn.Module):
             ).squeeze(1)
 
         return o
+
+
+class QKVProjection(nn.Module):
+    def __init__(
+        self,
+        hidden_shape,
+        num_attention_heads,
+        num_kv_heads,
+        head_dim,
+    ):
+        super().__init__()
+        self.num_attention_heads = num_attention_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.linear = nn.Linear(hidden_shape, (num_attention_heads + 2 * num_kv_heads) * head_dim, bias=True)
+
+
+    def forward(self, hidden):
+        qkv_proj = self.linear(hidden)
+        q_size = self.num_attention_heads * self.head_dim
+        kv_size = self.num_kv_heads * self.head_dim
+
+        q, k ,v = qkv_proj.split([q_size, kv_size, kv_size], dim=-1)
+
+        q = q.view(-1, self.num_attention_heads, self.head_dim)
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
+
+        return q, k, v
+
+
+
+class Qwen2Attention(nn.Module):
+    def __init__(
+        self,
+        config,
+    ):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.config = config
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = config.rope_theta
+        self.max_position_embeddings = config.max_position_embeddings
+        self.is_causal = True
+        self.qkv_proj = QKVProjection(self.hidden_size, config.num_attention_heads, config.num_key_value_heads, self.head_dim)
+        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
+        self.attn = AttentionInterface(self.num_heads, self.head_dim, self.scaling, self.num_kv_heads)
+        self.rotate = get_rope(self.head_dim, self.head_dim, self.max_position_embeddings, self.rope_theta)
+
+
+    @torch.compile
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ):
+        #get qkv projections
+        q, k, v = self.qkv_proj(hidden_states)
+
+        #rotate qk
+        q, k = self.rotate(positions, q, k)
+
+        #apply attention and return output
+        o = self.attn(q, k, v)
+        o = o.flatten(1, 2)
+        o = self.o_proj(o)
+
+        return o
+
+        
+
