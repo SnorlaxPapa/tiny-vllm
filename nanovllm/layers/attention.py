@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
-from vllm.utils.context import get_context
-from vllm.layers.rope import get_rope
+from nanovllm.utils.context import get_context
+from nanovllm.layers.rope import get_rope
 
 
 
@@ -161,6 +161,7 @@ class QKVProjection(nn.Module):
 
 
 class Qwen2Attention(nn.Module):
+    
     def __init__(
         self,
         config,

@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from copy import copy
 from itertools import count
-from ..sampling_params import SamplingParams
+from nanovllm.sampling_params import SamplingParams
 
 
 class SequenceStatus(Enum):
@@ -12,7 +12,7 @@ class SequenceStatus(Enum):
 
 class Sequence:
 
-    block_size=4
+    block_size=256
     counter = count()
 
     def __init__(self, token_ids, sampling_params = SamplingParams()):

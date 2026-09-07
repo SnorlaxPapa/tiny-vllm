@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-from vllm.layers.mlp_layer import GatedLinear
-from vllm.layers.norm import RMSNorm
-from vllm.layers.attention import Qwen2Attention
+from nanovllm.layers.mlp_layer import GatedLinear
+from nanovllm.layers.norm import RMSNorm
+from nanovllm.layers.attention import Qwen2Attention
 
-class Block(nn.Module):
+class Qwen2DecoderBlock(nn.Module):
     """ block structure rms norm -> attention -> rms norm (with residual) -> gated linear unit"""
     def __init__(self, config):
         super().__init__()

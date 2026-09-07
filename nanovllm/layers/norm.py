@@ -17,7 +17,7 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         # normalize and scale
         x = x / rms * self.weight
-        
+
         return x.to(original_dtype), residual.to(original_dtype)
 
     
@@ -29,6 +29,7 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         # normalize and scale
         return (x / rms * self.weight).to(original_dtype)
+
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
         if residual is not None:
