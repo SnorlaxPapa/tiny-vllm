@@ -93,7 +93,8 @@ class AttentionInterface(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
-        self.k_cache = self.v_cache = torch.tensor([])
+        self.k_cache = torch.tensor([])
+        self.v_cache = torch.tensor([])
 
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
