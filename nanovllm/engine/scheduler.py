@@ -24,9 +24,13 @@ class Scheduler:
 
 
     def add(self, seq: Sequence):
-        self.waiting.append(seq)
+      self.waiting.append(seq)
 
-        
+    
+    def is_finished(self):
+      return not self.running and not self.waiting
+      
+
     def schedule(self):
         """for simplicity, i utilize a homogenous scheduler """
         scheduled_sequences = []
