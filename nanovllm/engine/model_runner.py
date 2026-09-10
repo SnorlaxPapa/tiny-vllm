@@ -19,7 +19,8 @@ class ModelRunner:
     self.sampler = Sampler()
     self.warmup_model()
     self.allocate_kv_cache()
-
+    if not self.config.enforce_eager:
+        self.capture_cuda_graph()
 
   def warmup_model(self):
       torch.cuda.empty_cache()
@@ -223,5 +224,70 @@ class ModelRunner:
     return token_idxs.tolist()
 
 
+  @torch.inference_mode()
+  def capture_cuda_graph(self):
+    """capture decode cuda graphs for batches 1 -> max seq, pad for batches < 16"""
+    #get max block size and batch size for kernel launches
+    max_bs = min(self.config.max_num_seqs, 512)
+
+    max_blocks_per_seq = (self.config.max_model_len + self.config.kv_cache_block_size - 1) // self.config.kv_cache_block_size
+
+    #initialize our context tensors
+    context_lens = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+    slot_mapping = torch.full(
+      (max_bs,), -1, dtype=torch.int32, device="cuda"
+    )
+    block_tables = torch.zeros(max_bs, max_blocks_per_seq, dtype=torch.int32, device="cuda")
+
+    #initialize tensors for model forward pass
+    positions = torch.zeros(max_bs, dtype=torch.long, device="cuda")
+    input_ids = torch.zeros(max_bs, dtype=torch.long, device="cuda")
+    output = torch.zeros(max_bs, self.hf_config.vocab_size, dtype=next(self.model.parameters()).dtype, device="cuda")
+    sample_indices = torch.arange(0, max_bs, dtype=torch.long, device="cuda")
+    
+    self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+    self.graphs = {}
+    self.graph_pool = None
+
+    #set up side-stream for cuda graph warmup and capture
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+
+    with torch.cuda.stream(s):
+      for bs in reversed(self.graph_bs):
+        g = torch.cuda.CUDAGraph()
+        
+        set_context(
+          is_prefill=False,
+          context_lens=context_lens[:bs],
+          slot_mapping=slot_mapping[:bs],
+          block_tables=block_tables[:bs],
+        )
+
+        #warmup
+        output[:bs] = self.model(input_ids[:bs], positions[:bs], sample_indices[:bs])
+
+        #capture graph
+        with torch.cuda.graph(g, self.graph_pool, stream=s):
+          output[:bs] = self.model(input_ids[:bs], positions[:bs], sample_indices[:bs])
+        if self.graph_pool is None:
+          self.graph_pool = g.pool()
+        self.graphs[bs] = g
+
+        torch.cuda.synchronize()
+        reset_context()
+    
+    torch.cuda.current_stream().wait_stream(s)
+
+    self.graph_vars = dict(
+        input_ids=input_ids,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        context_lens=context_lens,
+        block_tables=block_tables,
+        outputs=output,
+        sample_indices=sample_indices,
+    )
 
 
+      
