@@ -30,6 +30,10 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
 
 
+    def add(self, seq: Sequence):
+        self.waiting.append(seq)
+        
+
     def __len__(self):
         return len(self.token_ids)
 
