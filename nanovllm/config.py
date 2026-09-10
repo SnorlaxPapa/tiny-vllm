@@ -9,7 +9,7 @@ class Config:
         max_num_batch_tokens: int = 16384,
         max_num_seqs: int = 512,
         max_model_len: int = 4096,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = 0.85,
         enforce_eager: bool = False,
         kv_cache_block_size: int = 256,
         num_kvcache_blocks: int = -1,

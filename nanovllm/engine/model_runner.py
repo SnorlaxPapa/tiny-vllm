@@ -4,7 +4,7 @@ from transformers import AutoConfig
 
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.sampler import Sampler
-from nanovllm.utils.context import set_context, reset_context
+from nanovllm.utils.context import set_context, reset_context, get_context
 from nanovllm.utils.model_loader import load_model
 from nanovllm.config import Config
 
@@ -21,6 +21,7 @@ class ModelRunner:
     self.allocate_kv_cache()
     if not self.config.enforce_eager:
         self.capture_cuda_graph()
+
 
   def warmup_model(self):
       torch.cuda.empty_cache()
@@ -207,21 +208,63 @@ class ModelRunner:
 
 
   @torch.inference_mode()
+  def run_prefill_eager_decode(
+      self, 
+      packed_tokens: torch.Tensor, 
+      positions: torch.Tensor, 
+      sample_indices: torch.Tensor, 
+  ) -> torch.Tensor:
+
+    return self.model(packed_tokens, positions, sample_indices)
+
+
+  @torch.inference_mode()
+  def run_cuda(
+      self, 
+      packed_tokens: torch.Tensor, 
+      positions: torch.Tensor, 
+  ) -> torch.Tensor:
+    context = get_context()
+    bs = packed_tokens.shape(0)
+    graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+    graph_vars = self.graph_vars
+    graph_vars["input_ids"][:bs] = packed_tokens
+    graph_vars["positions"][:bs] = positions
+    graph_vars["slot_mapping"].fill_(-1)
+    graph_vars["slot_mapping"][:bs] = context.slot_mapping
+    graph_vars["context_lens"].zero_()
+    graph_vars["context_lens"][:bs] = context.context_lens
+    graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+    graph.replay()
+
+    return graph_vars["outputs"][:bs]
+
+
   def run(self, scheduled_sequences: list[Sequence], is_prefill: bool) -> list[int]:
+    """split based on prefill/eager decode and cuda graph decode"""
     try:
-      if is_prefill:
-        packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
+      #prefill or eager decode 
+      if is_prefill or self.config.enforce_eager:
+        if is_prefill:
+          packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
+        else:
+          packed_tokens, positions = self.prepare_decode(scheduled_sequences)
+        
+        sample_indices, temperature = self.prepare_sample(scheduled_sequences)
+        logits = self.run_prefill_eager_decode(packed_tokens, positions, sample_indices)
+
       else:
         packed_tokens, positions = self.prepare_decode(scheduled_sequences)
+        sample_indices, temperature = self.prepare_sample(scheduled_sequences)
+        logits = self.run_cuda(packed_tokens, positions)
 
-      sample_indices, temperature = self.prepare_sample(scheduled_sequences)
-      logits = self.model(packed_tokens, positions, sample_indices)
-      token_idxs = self.sampler(logits, temperature)
+      token_idxs = self.sampler(logits, temperature).tolist()
 
     finally:
       reset_context()
+    
+    return token_idxs
 
-    return token_idxs.tolist()
 
 
   @torch.inference_mode()
@@ -245,7 +288,12 @@ class ModelRunner:
     output = torch.zeros(max_bs, self.hf_config.vocab_size, dtype=next(self.model.parameters()).dtype, device="cuda")
     sample_indices = torch.arange(0, max_bs, dtype=torch.long, device="cuda")
     
-    self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+    self.graph_bs = sorted({
+        bs
+        for bs in [1, 2, 4, 8, *range(16, max_bs + 1, 16), max_bs]
+        if bs <= max_bs
+    })
+
     self.graphs = {}
     self.graph_pool = None
 
