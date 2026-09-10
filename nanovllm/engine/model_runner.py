@@ -225,7 +225,7 @@ class ModelRunner:
       positions: torch.Tensor, 
   ) -> torch.Tensor:
     context = get_context()
-    bs = packed_tokens.shape(0)
+    bs = packed_tokens.shape[0]
     graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
     graph_vars = self.graph_vars
     graph_vars["input_ids"][:bs] = packed_tokens
