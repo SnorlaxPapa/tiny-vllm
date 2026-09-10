@@ -23,6 +23,10 @@ class Scheduler:
         self.waiting.appendleft(seq)
 
 
+    def add(self, seq: Sequence):
+        self.waiting.append(seq)
+
+        
     def schedule(self):
         """for simplicity, i utilize a homogenous scheduler """
         scheduled_sequences = []

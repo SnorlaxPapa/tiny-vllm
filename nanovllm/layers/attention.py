@@ -175,7 +175,7 @@ class Qwen2Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.max_position_embeddings = config.max_position_embeddings
         self.is_causal = True
         self.qkv_proj = QKVProjection(self.hidden_size, config.num_attention_heads, config.num_key_value_heads, self.head_dim)
