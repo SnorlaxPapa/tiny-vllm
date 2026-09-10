@@ -61,8 +61,5 @@ class EngineCore:
 
 
     return [self.results[seq] for seq in self.request_ids]
-      
 
-model_dir = "/content/drive/MyDrive/vllmproject/checkpoints"
-engine = EngineCore(model_dir)
     
