@@ -2,21 +2,19 @@ import torch
 import torch.nn
 from transformers import AutoConfig
 
-from nanovllm.engine.scheduler import Scheduler
-from nanovllm.model.qwen2 import Qwen2Model
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, reset_context
 from nanovllm.utils.model_loader import load_model
+from nanovllm.config import Config
 
 
 class ModelRunner:
 
-  def __init__(self, model_dir: str, num_blocks: int, block_size: int):
+  def __init__(self, model_dir: str):
     """initiate model, warm up, allocate kv cache for each attention layer"""
-    self.config = AutoConfig.from_pretrained(model_dir)
-    self.block_size = block_size
-    self.num_blocks = num_blocks
+    self.hf_config = AutoConfig.from_pretrained(model_dir)
+    self.config = Config(model_dir)
     self.model = load_model(model_dir)
     self.sampler = Sampler()
     self.warmup_model()
@@ -24,15 +22,49 @@ class ModelRunner:
 
 
   def warmup_model(self):
-      pass
+      torch.cuda.empty_cache()
+      torch.cuda.reset_peak_memory_stats() #reset and free up memory
+
+      token_budget = self.config.max_num_batch_tokens
+      seq_len = min(token_budget, self.config.max_model_len)
+
+      num_sequences = min(token_budget // seq_len, self.config.max_num_seqs)
+
+      scheduled_sequences = [Sequence([0] * seq_len) for _ in range(num_sequences)]
+
+      for sequence in scheduled_sequences:
+        sequence.num_scheduled_tokens = seq_len
+
+      self.run(scheduled_sequences, True)
+
+      torch.cuda.synchronize()
+      torch.cuda.empty_cache()
+
 
 
   def allocate_kv_cache(self):
     """allocate kv cache"""
-    head_dim = self.config.hidden_size // self.config.num_attention_heads
-    kv_cache_shape = (self.num_blocks, self.block_size, self.config.num_key_value_heads, head_dim)
+    free, total = torch.cuda.mem_get_info() #free and total vram
+    used = total - free #total vram currently used
+    peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"] #peak memory allocated for torch tensors
+    current = torch.cuda.memory_stats()["allocated_bytes.all.current"] #current memory allocated for torch tensors
+
+    head_dim = self.hf_config.hidden_size // self.hf_config.num_attention_heads
     dtype = next(self.model.parameters()).dtype
 
+    block_bytes = (
+        2 *
+        self.config.kv_cache_block_size *
+        self.hf_config.num_key_value_heads *
+        self.hf_config.num_hidden_layers *
+        head_dim *
+        dtype.itemsize
+    )
+
+    self.config.num_kvcache_blocks = int(total * self.config.gpu_memory_utilization - used - peak + current) // block_bytes
+    assert self.config.num_kvcache_blocks > 0, "Unable to allocate kv blocks, consider increasing gpu_memory_utilization"
+
+    kv_cache_shape = (self.config.num_kvcache_blocks, self.config.kv_cache_block_size, self.hf_config.num_key_value_heads, head_dim)
     for layer in self.model.layers:
       layer.self_attn.attn.k_cache = torch.empty(kv_cache_shape, dtype=dtype, device="cuda")
       layer.self_attn.attn.v_cache = torch.empty(kv_cache_shape, dtype=dtype, device="cuda")
@@ -67,7 +99,7 @@ class ModelRunner:
       end = start + sequence.num_scheduled_tokens
       packed_tokens.extend(sequence.token_ids[start: end])
 
-      #configure max_seqlen_q k 
+      #configure max_seqlen_q k
       max_seqlen_q = max(max_seqlen_q, sequence.num_scheduled_tokens)
       max_seqlen_k = max(max_seqlen_k, end)
 
@@ -85,11 +117,11 @@ class ModelRunner:
       if not sequence.block_list: continue #warm up
 
       for position in sequence_positions:
-        block_idx = position // self.block_size
-        offset = position % self.block_size
+        block_idx = position // self.config.kv_cache_block_size
+        offset = position % self.config.kv_cache_block_size
 
-        physical_block = sequence.block_list[block_idx] 
-        slot = physical_block * self.block_size + offset
+        physical_block = sequence.block_list[block_idx]
+        slot = physical_block * self.config.kv_cache_block_size + offset
         slot_mappings.append(slot)
 
     #get physical block tables per sequence, must be uniform dim (seq, max_block_list)
@@ -97,7 +129,7 @@ class ModelRunner:
       block_tables = self.prepare_block(scheduled_sequences)
       block_tables = torch.tensor(block_tables, dtype=torch.int32, device="cuda")
 
-    #move to gpu 
+    #move to gpu
     packed_tokens = torch.tensor(packed_tokens, dtype=torch.long, device="cuda") #long for embedding
     positions = torch.tensor(positions, dtype=torch.long, device="cuda") #long for indexing
 
@@ -126,21 +158,19 @@ class ModelRunner:
 
     for sequence in scheduled_sequences:
       packed_tokens.append(sequence.last_token)
-      position = len(sequence) -1 
+      position = len(sequence) -1
 
       #slot mapping
-      block_idx = position // self.block_size
-      offset = position % self.block_size
+      block_idx = position // self.config.kv_cache_block_size
+      offset = position % self.config.kv_cache_block_size
       physical_block = sequence.block_list[block_idx]
-      physical_idx = physical_block * self.block_size + offset
+      physical_idx = physical_block * self.config.kv_cache_block_size + offset
       slot_mapping.append(physical_idx)
 
 
       positions.append(len(sequence) - 1)
       context_lens.append(len(sequence))
 
-      
-    
     packed_tokens = torch.tensor(packed_tokens, dtype=torch.long, device="cuda")
     positions = torch.tensor(positions, dtype=torch.long, device="cuda")
 
@@ -158,7 +188,7 @@ class ModelRunner:
 
     return packed_tokens, positions
 
-  
+
   def prepare_sample(self, scheduled_sequences: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
     temperature = []
     sample_indices = []
@@ -174,10 +204,11 @@ class ModelRunner:
 
     return sample_indices, temperature
 
+
   @torch.inference_mode()
   def run(self, scheduled_sequences: list[Sequence], is_prefill: bool) -> list[int]:
     try:
-      if is_prefill: 
+      if is_prefill:
         packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
       else:
         packed_tokens, positions = self.prepare_decode(scheduled_sequences)
@@ -190,6 +221,7 @@ class ModelRunner:
       reset_context()
 
     return token_idxs.tolist()
+
 
 
 
