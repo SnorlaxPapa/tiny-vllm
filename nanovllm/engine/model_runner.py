@@ -6,7 +6,7 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.model.qwen2 import Qwen2Model
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.sampler import Sampler
-from nanovllm.utils.context import set_context
+from nanovllm.utils.context import set_context, reset_context
 from nanovllm.utils.model_loader import load_model
 
 
@@ -158,10 +158,38 @@ class ModelRunner:
 
     return packed_tokens, positions
 
+  
+  def prepare_sample(self, scheduled_sequences: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
+    temperature = []
+    sample_indices = []
+    token_count = 0
+    for sequence in scheduled_sequences:
+      temperature.append(sequence.temperature)
 
+      token_count += sequence.num_scheduled_tokens
+      sample_indices.append(token_count - 1)
 
+    temperature = torch.tensor(temperature, dtype=torch.float32, device="cuda")
+    sample_indices = torch.tensor(sample_indices, dtype=torch.long, device="cuda")
 
+    return sample_indices, temperature
 
+  @torch.inference_mode()
+  def run(self, scheduled_sequences: list[Sequence], is_prefill: bool) -> list[int]:
+    try:
+      if is_prefill: 
+        packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
+      else:
+        packed_tokens, positions = self.prepare_decode(scheduled_sequences)
+
+      sample_indices, temperature = self.prepare_sample(scheduled_sequences)
+      logits = self.model(packed_tokens, positions, sample_indices)
+      token_idxs = self.sampler(logits, temperature)
+
+    finally:
+      reset_context()
+
+    return token_idxs.tolist()
 
 
 
