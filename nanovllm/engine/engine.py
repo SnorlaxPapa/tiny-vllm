@@ -9,7 +9,7 @@ from nanovllm.layers.sampler import Sampler
 class EngineCore:
 
   def __init__(self, model_dir: str, benchmark: bool = False):
-    self.runner = ModelRunner(model_dir) #allocate kv cache 
+    self.runner = ModelRunner(model_dir) #allocate kv cache
     config = self.runner.config
     self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
     config.eos = self.tokenizer.eos_token_id #get eos marker
@@ -17,7 +17,7 @@ class EngineCore:
     self.request_ids = []
     self.results = {}
     self.benchmark = benchmark
-    
+
     #calculate tft for benchmark
     if self.benchmark:
       self.start_times = {}
@@ -26,36 +26,33 @@ class EngineCore:
       self.last_token_times = {}
       self.itls = []
 
-  def add_prompt(self, input: str, sampling_param: SamplingParams):
-    if self.benchmark: 
-      start_time = perf_counter()
+  def add_prompt(self, input: str | list[int], sampling_param: SamplingParams):
+    if isinstance(input, str):
+      token_ids = self.tokenizer.apply_chat_template(
+        [{"role": "system", "content": "/no_think You are Qwen, a helpful assistant."},
+        {"role": "user", "content": input}],
+        tokenize=True,
+        add_generation_prompt=True,
+      )["input_ids"]
 
-    token_ids = self.tokenizer.apply_chat_template(
-      [{"role": "system", "content": "/no_think You are Qwen, a helpful assistant."},
-       {"role": "user", "content": input}],
-      tokenize=True,
-      add_generation_prompt=True,
-    )
+    else:
+      token_ids = input.copy()
 
-    sequence = Sequence(token_ids["input_ids"], sampling_param)
-    
-    if self.benchmark:
-      self.start_times[sequence.seq_id] = start_time
-
+    sequence = Sequence(token_ids, sampling_param)
     self.request_ids.append(sequence.seq_id)
     self.scheduler.add(sequence)
 
 
   def generate(
       self,
-      inputs: list[str],
+      inputs: list[str] | list[list[int]],
       sampling_params: SamplingParams | list[SamplingParams],
   ):
     if isinstance(sampling_params, list):
-      assert len(sampling_params) == len(inputs), "Ensure every prompt has an allocated sampling param"     
+      assert len(sampling_params) == len(inputs), "Ensure every prompt has an allocated sampling param"
     else:
       sampling_params = [sampling_params] * len(inputs)
-    
+
     #reset our accumulators
     if self.benchmark:
       self.start_times.clear()
@@ -63,13 +60,20 @@ class EngineCore:
       self.first_token_times.clear()
       self.last_token_times.clear()
       self.itls.clear()
-    
+
     self.request_ids = []
     self.results = {}
     #add prompts to waiting
     for input, sampling_param in zip(inputs, sampling_params):
       self.add_prompt(input, sampling_param)
 
+    #create start times
+    if self.benchmark:
+        batch_start = perf_counter()
+        self.start_times = {
+            seq_id: batch_start
+            for seq_id in self.request_ids
+    }
     #clear all running and waiting sequences
     while not self.scheduler.is_finished():
       scheduled_sequences, is_prefill = self.scheduler.schedule()
@@ -82,7 +86,7 @@ class EngineCore:
         for sequence in scheduled_sequences:
 
           finished_prefill = (
-              sequence.num_computed_tokens + 
+              sequence.num_computed_tokens +
               sequence.num_scheduled_tokens ==
               len(sequence)
           )
@@ -96,10 +100,10 @@ class EngineCore:
           if sequence.seq_id not in self.first_token_times:
             self.first_token_times[sequence.seq_id] = end_time
             self.ttft[sequence.seq_id] = end_time - self.start_times[sequence.seq_id]
-          
+
           else:
             self.itls.append(end_time - self.last_token_times[sequence.seq_id])
-          
+
           self.last_token_times[sequence.seq_id] = end_time
 
       #postprocessing scheduled sequences
@@ -119,4 +123,3 @@ class EngineCore:
 
     return [self.results[seq] for seq in self.request_ids]
 
-    
