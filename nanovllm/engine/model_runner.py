@@ -152,105 +152,44 @@ class ModelRunner:
     return packed_tokens, positions
 
 
-  def prepare_decode(
-      self,
-      scheduled_sequences: list[Sequence],
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+  def prepare_decode(self, scheduled_sequences: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
+    context_lens = []
+    packed_tokens = []
+    positions = []
+    slot_mapping = []
 
-      bs = len(scheduled_sequences)
+    for sequence in scheduled_sequences:
+      packed_tokens.append(sequence.last_token)
+      position = len(sequence) -1
 
-      # CUDA-graph decode path
-      if not self.config.enforce_eager:
-          graph_bs = next(x for x in self.graph_bs if x >= bs)
-          host = self.decode_host
+      #slot mapping
+      block_idx = position // self.config.kv_cache_block_size
+      offset = position % self.config.kv_cache_block_size
+      physical_block = sequence.block_list[block_idx]
+      physical_idx = physical_block * self.config.kv_cache_block_size + offset
+      slot_mapping.append(physical_idx)
 
-          host["input_ids"][:graph_bs].zero_()
-          host["positions"][:graph_bs].zero_()
-          host["context_lens"][:graph_bs].zero_()
-          host["slot_mapping"][:graph_bs].fill_(-1)
-          host["block_tables"][:graph_bs].fill_(-1)
 
-          for i, sequence in enumerate(scheduled_sequences):
-              position = len(sequence) - 1
+      positions.append(len(sequence) - 1)
+      context_lens.append(len(sequence))
 
-              host["input_ids"][i] = sequence.last_token
-              host["positions"][i] = position
-              host["context_lens"][i] = len(sequence)
+    packed_tokens = torch.tensor(packed_tokens, dtype=torch.long, device="cuda")
+    positions = torch.tensor(positions, dtype=torch.long, device="cuda")
 
-              block_idx = position // self.config.kv_cache_block_size
-              offset = position % self.config.kv_cache_block_size
-              physical_block = sequence.block_list[block_idx]
+    context_lens = torch.tensor(context_lens, dtype=torch.int32, device="cuda")
+    block_tables = self.prepare_block(scheduled_sequences)
+    block_tables = torch.tensor(block_tables, dtype=torch.int32, device="cuda")
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device="cuda")
 
-              host["slot_mapping"][i] = (
-                  physical_block * self.config.kv_cache_block_size
-                  + offset
-              )
+    set_context(
+        is_prefill=False,
+        context_lens=context_lens,
+        slot_mapping=slot_mapping,
+        block_tables=block_tables,
+    )
 
-              for j, block_id in enumerate(sequence.block_list):
-                  host["block_tables"][i, j] = block_id
+    return packed_tokens, positions
 
-          return (
-              host["input_ids"][:bs],
-              host["positions"][:bs],
-          )
-
-      # Eager decode path
-      packed_tokens = []
-      positions = []
-      context_lens = []
-      slot_mapping = []
-
-      for sequence in scheduled_sequences:
-          packed_tokens.append(sequence.last_token)
-
-          position = len(sequence) - 1
-          positions.append(position)
-          context_lens.append(len(sequence))
-
-          block_idx = position // self.config.kv_cache_block_size
-          offset = position % self.config.kv_cache_block_size
-          physical_block = sequence.block_list[block_idx]
-
-          slot_mapping.append(
-              physical_block * self.config.kv_cache_block_size + offset
-          )
-
-      packed_tokens = torch.tensor(
-          packed_tokens,
-          dtype=torch.long,
-          device="cuda",
-      )
-      positions = torch.tensor(
-          positions,
-          dtype=torch.long,
-          device="cuda",
-      )
-      context_lens = torch.tensor(
-          context_lens,
-          dtype=torch.int32,
-          device="cuda",
-      )
-      slot_mapping = torch.tensor(
-          slot_mapping,
-          dtype=torch.int32,
-          device="cuda",
-      )
-      block_tables = torch.tensor(
-          self.prepare_block(scheduled_sequences),
-          dtype=torch.int32,
-          device="cuda",
-      )
-
-      set_context(
-          is_prefill=False,
-          context_lens=context_lens,
-          slot_mapping=slot_mapping,
-          block_tables=block_tables,
-      )
-
-      return packed_tokens, positions
-
- 
 
   def prepare_sample(self, scheduled_sequences: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
     temperature = []
@@ -280,44 +219,27 @@ class ModelRunner:
 
 
   @torch.inference_mode()
-  def run_cuda(self, packed_tokens, positions):
-      bs = packed_tokens.shape[0]
-      graph_bs = next(x for x in self.graph_bs if x >= bs)
+  def run_cuda(
+      self, 
+      packed_tokens: torch.Tensor, 
+      positions: torch.Tensor, 
+  ) -> torch.Tensor:
+    context = get_context()
+    bs = packed_tokens.shape[0]
+    graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+    graph_vars = self.graph_vars
+    graph_vars["input_ids"][:bs] = packed_tokens
+    graph_vars["positions"][:bs] = positions
+    graph_vars["slot_mapping"].fill_(-1)
+    graph_vars["slot_mapping"][:bs] = context.slot_mapping
+    graph_vars["context_lens"].zero_()
+    graph_vars["context_lens"][:bs] = context.context_lens
+    graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+    graph.replay()
 
-      host = self.decode_host
-      graph_vars = self.graph_vars
-      graph = self.graphs[graph_bs]
+    return graph_vars["outputs"][:bs]
 
-      graph_vars["input_ids"][:graph_bs].copy_(
-          host["input_ids"][:graph_bs],
-          non_blocking=True,
-      )
 
-      graph_vars["positions"][:graph_bs].copy_(
-          host["positions"][:graph_bs],
-          non_blocking=True,
-      )
-
-      graph_vars["context_lens"][:graph_bs].copy_(
-          host["context_lens"][:graph_bs],
-          non_blocking=True,
-      )
-
-      graph_vars["slot_mapping"][:graph_bs].copy_(
-          host["slot_mapping"][:graph_bs],
-          non_blocking=True,
-      )
-
-      graph_vars["block_tables"][:graph_bs].copy_(
-          host["block_tables"][:graph_bs],
-          non_blocking=True,
-      )
-
-      graph.replay()
-
-      return graph_vars["outputs"][:bs]
-
-  @torch.inference_mode()
   def run(self, scheduled_sequences: list[Sequence], is_prefill: bool) -> list[int]:
     """split based on prefill/eager decode and cuda graph decode"""
     try:
@@ -374,29 +296,6 @@ class ModelRunner:
         for bs in [1, 2, 4, 8, *range(16, max_bs + 1, 16), max_bs]
         if bs <= max_bs
     })
-
-    #intiialize pinned cpu buffer
-    self.decode_host = {
-        "input_ids": torch.empty(
-            max_bs, dtype=torch.long, device="cpu", pin_memory=True
-        ),
-        "positions": torch.empty(
-            max_bs, dtype=torch.long, device="cpu", pin_memory=True
-        ),
-        "context_lens": torch.empty(
-            max_bs, dtype=torch.int32, device="cpu", pin_memory=True
-        ),
-        "slot_mapping": torch.empty(
-            max_bs, dtype=torch.int32, device="cpu", pin_memory=True
-        ),
-        "block_tables": torch.empty(
-            max_bs,
-            max_blocks_per_seq,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
-        ),
-    }
 
     self.graphs = {}
     self.graph_pool = None
