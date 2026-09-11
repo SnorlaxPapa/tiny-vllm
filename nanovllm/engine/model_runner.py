@@ -258,7 +258,10 @@ class ModelRunner:
         sample_indices, temperature = self.prepare_sample(scheduled_sequences)
         logits = self.run_cuda(packed_tokens, positions)
 
-      token_idxs = self.sampler(logits, temperature).tolist()
+      if all(seq.temperature == 0 for seq in scheduled_sequences):
+          token_idxs = logits.argmax(dim=-1).tolist()
+      else:
+          token_idxs = self.sampler(logits, temperature).tolist()
 
     finally:
       reset_context()

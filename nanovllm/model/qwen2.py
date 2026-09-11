@@ -23,9 +23,9 @@ class Qwen2Model(nn.Module):
 
         for layer in self.layers:
             x = layer(x, positions)
-
-        x = self.norm(x, None)
+            
         x = x[sample_indices]
+        x = self.norm(x, None)
 
         logits = F.linear(
             x,

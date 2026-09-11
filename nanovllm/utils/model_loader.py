@@ -54,6 +54,15 @@ def load_model(model_dir):
 
       #free up space
       del q, k, v
+    
+    elif "mlp.gate_up_proj.weight" in name:
+      prefix = name.split(".mlp")[0]
+      up = tensors.pop(f"model.{prefix}.mlp.up_proj.weight")
+      gate = tensors.pop(f"model.{prefix}.mlp.gate_proj.weight")
+
+      tensor = torch.cat([gate, up], dim=0)
+
+      del up, gate
 
     else:
       tensor = tensors.pop(f"model.{name}")
