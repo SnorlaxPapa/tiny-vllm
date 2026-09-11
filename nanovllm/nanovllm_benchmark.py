@@ -2,7 +2,17 @@
 from statistics import median
 import pandas as pd
 
+from nanovllm.engine.engine import EngineCore
+from nanovllm.sampling_params import SamplingParams
+import torch
+import matplotlib.pyplot as plt
+import torch._dynamo
 
+torch._dynamo.config.recompile_limit = 64
+
+torch.manual_seed(42)
+model_dir = "/content/drive/MyDrive/vllmproject/checkpoints"
+engine = EngineCore(model_dir, benchmark=True)
 rng = torch.Generator(device="cpu").manual_seed(42)
 
 def create_batch(batch_size: int, seq_len: int) -> list[list[int]]:
