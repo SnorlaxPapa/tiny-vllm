@@ -1,0 +1,7 @@
+torch
+triton
+vllm
+hf
+transformers
+safetensors
+matplotlib
