@@ -11,7 +11,7 @@ import torch._dynamo
 torch._dynamo.config.recompile_limit = 64
 
 torch.manual_seed(42)
-model_dir = "/content/drive/MyDrive/vllmproject/checkpoints"
+model_dir = "checkpoints"
 engine = EngineCore(model_dir, benchmark=True)
 
 

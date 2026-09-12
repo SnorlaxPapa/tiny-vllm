@@ -3,7 +3,8 @@
 Hello! Thanks for taking a look at my educational nanovLLM project. Here's a summary if you're in a hurry! 
 This project replicates vLLM's internals, including iterative scheduling, prefix sharing, chunked prefill, paged KV cache management, and non-eager execution via CUDA graph capture. For my model, I replicated Qwen2.5-3B-Instruct's architecture in Pytorch while fusing the weights for QKV projections and SwiGLU up/gate projections. 
 
-When benchmarked against vLLM on an A100, my nanoVLLM was able to achieve comparable Time To First Token (TTFT), while trailing by approximately ~0.3ms - 0.5ms for Inter-Token Latency (90%). You can find an explanation as to why [below](#closing-thoughts).
+When benchmarked against the vanilla HuggingFace model, the nanovLLM engine achieved roughly 3-6x token throughput per second.
+When benchmarked against vLLM on an A100, it was able to achieve comparable Time To First Token (TTFT), while trailing by approximately ~0.3ms - 0.5ms for Inter-Token Latency (90%). You can find an explanation as to why [below](#closing-thoughts).
 
 
 ## How To Use
@@ -79,11 +80,11 @@ Environment:
 
 ### Results
 
-![Results](benchmark_comparison.png)
+![Results](assets/benchmark.png)
 
 ## Closing Thoughts
 
-- Overall, the nanovLLM inference engine was able to match vLLM across different batch sizes and sequences for both TTFT and throughput
+- Overall, it works! The mini inference engine was able to produce tokens at a much higher throughput than a vanilla implementationl. More importantly, it was able to match vLLM across different batch sizes and sequences for both TTFT and token throughput
 - However, there was an approximately 0.3–0.5 ms gap for ITL.
 - I hypothesize that this is primarily due to the nature of the scheduler I built. Paired with its homogenous structure (only prefill, or only decode), it prioritizes prefill requests, meaning once the engine has completed the prefill of a sequence, it will not go on to decode it until all other sequences have been prefilled.
 - This leads to a fast TTFT as the first token is produced once prefill is decoded, and each sequence gets to their turn quickly.

@@ -15,8 +15,8 @@ from vllm import SamplingParams as VLLMSamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 
-MODEL_DIR = "/content/drive/MyDrive/vllmproject/checkpoints"
-CSV_PATH = "/content/drive/MyDrive/vllmproject/vllm_results.csv"
+MODEL_DIR = "checkpoints"
+CSV_PATH = "vllm_results.csv"
 
 MAX_MODEL_LEN = 4096
 OUTPUT_LENGTH = 64
