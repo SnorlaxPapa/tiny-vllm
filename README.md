@@ -1,6 +1,6 @@
 # nanovLLM
 
-Hello! Thanks for taking a look at my nanovLLM project. Here's a summary if you're in a hurry! 
+Hello! Thanks for taking a look at my educational nanovLLM project. Here's a summary if you're in a hurry! 
 This project replicates vLLM's internals, including iterative scheduling, prefix sharing, chunked prefill, paged KV cache management, and non-eager execution via CUDA graph capture. For my model, I replicated Qwen2.5-3B-Instruct's architecture in Pytorch while fusing the weights for QKV projections and SwiGLU up/gate projections. 
 
 When benchmarked against vLLM on an A100, my nanoVLLM was able to achieve comparable Time To First Token (TTFT), while trailing by approximately ~0.3ms - 0.5ms for Inter-Token Latency (90%). You can find an explanation as to why [below](#closing-thoughts).
