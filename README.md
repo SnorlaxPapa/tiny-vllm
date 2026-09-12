@@ -92,6 +92,10 @@ Environment:
 - On the contrary, vLLM's scheduler is likely non-homogenous, and is able to mix both decode and prefill requests, which complements well with iterative scheduling, allowing it both fast TTFT and ITL speeds.
 
 
+## Acknowledgments
+
+This project is inspired by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm), which implements a minimal vLLM-style inference engine. Architecture and scheduling design closely follow their approach.
+
 
 
 
