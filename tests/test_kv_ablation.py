@@ -145,3 +145,12 @@ def test_plot_and_report_handle_partial_results(tmp_path):
     body = (tmp_path / "README.md").read_text()
     assert "Incomplete: prompt=128" in body
     assert "synthetic test failure" in body
+
+    # A killed worker may have flushed JSONL before the parent writes raw.csv.
+    saved_rows = list(csv.DictReader((tmp_path / "raw.csv").open()))
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "partial.jsonl").write_text("".join(json.dumps(r)+"\n" for r in saved_rows))
+    (tmp_path / "raw.csv").unlink()
+    report(tmp_path)
+    assert (tmp_path / "raw.csv").exists()
+    assert "Incomplete: prompt=128" in (tmp_path / "README.md").read_text()

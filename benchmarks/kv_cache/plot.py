@@ -5,6 +5,9 @@ import csv
 import json
 from pathlib import Path
 import statistics
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 METRICS = {
     "ttft_ms": "TTFT (ms)",
@@ -38,6 +41,11 @@ def report(results):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    # Recover repeats already flushed by a worker even if Colab interrupted
+    # the parent before it could aggregate raw.csv.
+    if (results / "runs").exists():
+        from benchmarks.kv_cache.run import save_csv
+        save_csv(results)
     rows = list(csv.DictReader((results / "raw.csv").open()))
     summary = summarize(rows)
     config = json.loads((results / "config.json").read_text())
