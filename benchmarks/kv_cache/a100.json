@@ -1,0 +1,10 @@
+{
+  "model": "checkpoints/Qwen3-4B",
+  "prompt_lengths": [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
+  "output_tokens": 128,
+  "repeats": 3,
+  "warmups": 2,
+  "seed": 42,
+  "cuda_graphs": true,
+  "gpu_memory_utilization": 0.90
+}

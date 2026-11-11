@@ -1,125 +1,127 @@
-from transformers import AutoTokenizer
 from time import perf_counter
+
+import torch
+from transformers import AutoTokenizer
+
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
-from nanovllm.layers.sampler import Sampler
+
 
 class EngineCore:
+    def __init__(self, model_dir: str, benchmark: bool = False, **config_kwargs):
+        self.runner = ModelRunner(model_dir, **config_kwargs)
+        config = self.runner.config
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        config.eos = self.tokenizer.eos_token_id
+        self.scheduler = Scheduler(config)
+        self.request_ids = []
+        self.results = {}
+        self.benchmark = benchmark
+        self.last_metrics = {}
+        self.output_token_ids = []
 
-  def __init__(self, model_dir: str, benchmark: bool = False):
-    self.runner = ModelRunner(model_dir) #allocate kv cache
-    config = self.runner.config
-    self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    config.eos = self.tokenizer.eos_token_id #get eos marker
-    self.scheduler = Scheduler(config)
-    self.request_ids = []
-    self.results = {}
-    self.benchmark = benchmark
+    def add_prompt(self, input: str | list[int], sampling_param: SamplingParams):
+        if isinstance(input, str):
+            token_ids = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": input}], tokenize=True,
+                add_generation_prompt=True, enable_thinking=False,
+            )
+        else:
+            token_ids = input.copy()
+        config = self.runner.config
+        if not token_ids or sampling_param.max_tokens < 1:
+            raise ValueError("Prompts and generated token counts must be nonempty")
+        if len(token_ids) + sampling_param.max_tokens > config.max_model_len:
+            raise ValueError("Prompt + requested output exceeds max_model_len")
+        if any(not isinstance(t, int) or not 0 <= t < config.hf_config.vocab_size for t in token_ids):
+            raise ValueError("Input token ID is outside the model vocabulary")
+        sequence = Sequence(token_ids, sampling_param)
+        self.request_ids.append(sequence.seq_id)
+        self.scheduler.add(sequence)
 
-    #calculate tft for benchmark
-    if self.benchmark:
-      self.start_times = {}
-      self.ttft = {}
-      self.first_token_times = {}
-      self.last_token_times = {}
-      self.itls = []
+    def generate(self, inputs, sampling_params):
+        """Generate with the original API; benchmark=True still returns (TTFT, ITL).
 
-  def add_prompt(self, input: str | list[int], sampling_param: SamplingParams):
-    if isinstance(input, str):
-      token_ids = self.tokenizer.apply_chat_template(
-        [{"role": "system", "content": "/no_think You are Qwen, a helpful assistant."},
-        {"role": "user", "content": input}],
-        tokenize=True,
-        add_generation_prompt=True,
-      )["input_ids"]
-
-    else:
-      token_ids = input.copy()
-
-    sequence = Sequence(token_ids, sampling_param)
-    self.request_ids.append(sequence.seq_id)
-    self.scheduler.add(sequence)
-
-
-  def generate(
-      self,
-      inputs: list[str] | list[list[int]],
-      sampling_params: SamplingParams | list[SamplingParams],
-  ):
-    if isinstance(sampling_params, list):
-      assert len(sampling_params) == len(inputs), "Ensure every prompt has an allocated sampling param"
-    else:
-      sampling_params = [sampling_params] * len(inputs)
-
-    #reset our accumulators
-    if self.benchmark:
-      self.start_times.clear()
-      self.ttft.clear()
-      self.first_token_times.clear()
-      self.last_token_times.clear()
-      self.itls.clear()
-
-    self.request_ids = []
-    self.results = {}
-    #add prompts to waiting
-    for input, sampling_param in zip(inputs, sampling_params):
-      self.add_prompt(input, sampling_param)
-
-    #create start times
-    if self.benchmark:
-        batch_start = perf_counter()
-        self.start_times = {
-            seq_id: batch_start
-            for seq_id in self.request_ids
-    }
-    #clear all running and waiting sequences
-    while not self.scheduler.is_finished():
-      scheduled_sequences, is_prefill = self.scheduler.schedule()
-
-      outputs = self.runner.run(scheduled_sequences, is_prefill)
-
-      #get ttft for benchmark
-      if self.benchmark:
-        end_time = perf_counter()
-        for sequence in scheduled_sequences:
-
-          finished_prefill = (
-              sequence.num_computed_tokens +
-              sequence.num_scheduled_tokens ==
-              len(sequence)
-          )
-
-          produces_token = (
-              not is_prefill or finished_prefill
-          )
-
-          if not produces_token: continue
-
-          if sequence.seq_id not in self.first_token_times:
-            self.first_token_times[sequence.seq_id] = end_time
-            self.ttft[sequence.seq_id] = end_time - self.start_times[sequence.seq_id]
-
-          else:
-            self.itls.append(end_time - self.last_token_times[sequence.seq_id])
-
-          self.last_token_times[sequence.seq_id] = end_time
-
-      #postprocessing scheduled sequences
-      self.scheduler.postprocess(scheduled_sequences, outputs, is_prefill)
-
-      for sequence in scheduled_sequences:
-        if sequence.status == SequenceStatus.FINISHED:
-          output = self.tokenizer.decode(sequence.token_ids[sequence.num_prompt_tokens:], skip_special_tokens=True)
-          self.results[sequence.seq_id] = output
-
-    if self.benchmark:
-      #get average itl and ttft
-      average_ttft = sum(self.ttft.values()) / len(self.ttft)
-      average_itl = sum(self.itls) / len(self.itls) if self.itls else None
-
-      return average_ttft, average_itl
-
-    return [self.results[seq] for seq in self.request_ids]
-
+        Rich metrics and raw token timestamps are available in last_metrics.
+        Timings exclude tokenization/loading/warmup and stop at CPU-visible token
+        IDs, after runner.run's blocking .tolist(). Units are seconds.
+        """
+        if not inputs:
+            raise ValueError("At least one prompt is required")
+        if not self.scheduler.is_finished():
+            raise RuntimeError("Previous requests are still pending")
+        if isinstance(sampling_params, list):
+            if len(sampling_params) != len(inputs):
+                raise ValueError("Supply one sampling configuration per prompt")
+        else:
+            sampling_params = [sampling_params] * len(inputs)
+        self.request_ids, self.results = [], {}
+        self.output_token_ids = []
+        # Validate each request before enqueueing any of them.
+        try:
+            for prompt, params in zip(inputs, sampling_params):
+                self.add_prompt(prompt, params)
+        except Exception:
+            self.scheduler.waiting.clear()
+            self.request_ids.clear()
+            raise
+        self.ttft, self.first_token_times, self.last_token_times = {}, {}, {}
+        self.itls = []
+        events, completed = [], {}
+        replay_start = self.runner.graph_replays
+        if self.benchmark:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        start = perf_counter()
+        self.start_times = {sid: start for sid in self.request_ids}
+        final_token_time = start
+        while not self.scheduler.is_finished():
+            sequences, is_prefill = self.scheduler.schedule()
+            if not sequences:
+                raise RuntimeError("Scheduler made no progress")
+            outputs = self.runner.run(sequences, is_prefill)
+            now = perf_counter()
+            for seq in sequences:
+                produces_token = not is_prefill or seq.num_computed_tokens + seq.num_scheduled_tokens == len(seq)
+                if not produces_token:
+                    continue
+                itl = None
+                if seq.seq_id not in self.first_token_times:
+                    self.first_token_times[seq.seq_id] = now
+                    self.ttft[seq.seq_id] = now - start
+                else:
+                    itl = now - self.last_token_times[seq.seq_id]
+                    self.itls.append(itl)
+                self.last_token_times[seq.seq_id] = now
+                final_token_time = now
+                if self.benchmark:
+                    events.append(dict(request_id=seq.seq_id,
+                                       output_index=seq.num_completion_tokens,
+                                       context_tokens=len(seq),
+                                       elapsed_s=now-start, itl_s=itl))
+            self.scheduler.postprocess(sequences, outputs, is_prefill)
+            for seq in sequences:
+                if seq.status == SequenceStatus.FINISHED:
+                    completed[seq.seq_id] = seq.token_ids[seq.num_prompt_tokens:]
+        self.output_token_ids = [completed[sid] for sid in self.request_ids]
+        elapsed = final_token_time - start
+        total_tokens = sum(map(len, self.output_token_ids))
+        mean_ttft = sum(self.ttft.values()) / len(self.ttft)
+        mean_itl = sum(self.itls) / len(self.itls) if self.itls else None
+        self.last_metrics = dict(
+            ttft_s=mean_ttft, mean_itl_s=mean_itl, elapsed_s=elapsed,
+            output_tokens=total_tokens, output_tokens_per_s=total_tokens/elapsed,
+            graph_replays=self.runner.graph_replays-replay_start,
+            token_events=events,
+        )
+        if self.benchmark:
+            self.last_metrics.update(
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(),
+                peak_reserved_bytes=torch.cuda.max_memory_reserved(),
+                allocated_bytes=torch.cuda.memory_allocated(),
+                reserved_bytes=torch.cuda.memory_reserved(),
+            )
+            return mean_ttft, mean_itl
+        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in self.output_token_ids]

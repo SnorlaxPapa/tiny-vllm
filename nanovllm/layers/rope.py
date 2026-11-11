@@ -64,3 +64,7 @@ def get_rope(
 ):
     rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
     return rotary_emb
+
+def rope_theta(config):
+    parameters = getattr(config, "rope_parameters", None) or {}
+    return parameters.get("rope_theta", getattr(config, "rope_theta", 1000000.0))

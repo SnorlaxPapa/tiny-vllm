@@ -1,12 +1,14 @@
 import torch
 import gc
+import json
+from pathlib import Path
 from safetensors import safe_open
 from transformers import AutoConfig
-from nanovllm.layers.rope import RotaryEmbedding
+from nanovllm.layers.rope import RotaryEmbedding, rope_theta
 from nanovllm.model.qwen2 import Qwen2Model
 
 
-def initialize_rope(config, model):
+def initialize_rope(config, model, device="cuda"):
   head_dim = (
     getattr(config, "head_dim", None)
     or config.hidden_size // config.num_attention_heads
@@ -16,10 +18,10 @@ def initialize_rope(config, model):
       head_dim,
       head_dim,
       config.max_position_embeddings,
-      config.rope_parameters['rope_theta']
+      rope_theta(config)
   )
 
-  rope = rope.to("cuda")
+  rope = rope.to(device)
 
   for layer in model.layers:
     layer.self_attn.rotate = rope
@@ -27,16 +29,26 @@ def initialize_rope(config, model):
   return model
 
 
-def load_model(model_dir):
+def load_model(model_dir, device="cuda", dtype=torch.bfloat16):
   """maps weights to parameter name and load"""
   tensors = {}
 
-  for i in range(1, 3):
-    with safe_open(f"{model_dir}/model-0000{i}-of-00002.safetensors", framework="pt", device=0) as f:
-        for k in f.keys():
-          tensors[k] = f.get_tensor(k)
+  model_path = Path(model_dir)
+  index = model_path / "model.safetensors.index.json"
+  if index.exists():
+    shards = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+  else:
+    shards = ["model.safetensors"]
+  for shard in shards:
+    with safe_open(str(model_path / shard), framework="pt", device="cpu") as f:
+      for k in f.keys():
+        tensors[k] = f.get_tensor(k)
 
   config = AutoConfig.from_pretrained(model_dir)
+  if config.model_type not in ("qwen2", "qwen3"):
+    raise ValueError(f"Unsupported architecture: {config.model_type}")
+  if getattr(config, "use_sliding_window", False) or getattr(config, "rope_scaling", None):
+    raise ValueError("Sliding-window attention and scaled RoPE are not implemented")
 
   with torch.device("meta"):
     model = Qwen2Model(config)
@@ -65,18 +77,18 @@ def load_model(model_dir):
       del up, gate
 
     else:
-      tensor = tensors.pop(f"model.{name}")
+      tensor = tensors.pop(name if name.startswith("lm_head.") else f"model.{name}")
 
     assert tensor.shape == param.shape, (
           f"{name}: checkpoint {tensor.shape}, model {param.shape}"
     )
 
-    mapped_weights[name] = tensor
+    mapped_weights[name] = tensor.to(device=device, dtype=dtype)
 
 
   model.load_state_dict(mapped_weights, assign=True, strict=True)
   #initialize global rope layer
-  model = initialize_rope(config, model)
+  model = initialize_rope(config, model, device=device)
 
   model.eval()
 

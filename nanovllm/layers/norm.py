@@ -2,21 +2,21 @@ import torch
 import torch.nn as nn
 
 class RMSNorm(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, hidden_size=None):
         super().__init__()
         self.eps = config.rms_norm_eps
-        self.weight = nn.Parameter(torch.ones(config.hidden_size))
+        self.weight = nn.Parameter(torch.ones(hidden_size or config.hidden_size))
 
 
     @torch.compile
     def forward_residual(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         original_dtype = x.dtype
         # compute rms
-        x = x.float() + residual.float()
-        residual = x
+        residual = (x.float() + residual.float()).to(original_dtype)
+        x = residual.float()
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         # normalize and scale
-        x = x / rms * self.weight
+        x = (x / rms).to(original_dtype) * self.weight
 
         return x.to(original_dtype), residual.to(original_dtype)
 
@@ -28,7 +28,7 @@ class RMSNorm(nn.Module):
         # compute rms
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         # normalize and scale
-        return (x / rms * self.weight).to(original_dtype)
+        return (x / rms).to(original_dtype) * self.weight
 
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:

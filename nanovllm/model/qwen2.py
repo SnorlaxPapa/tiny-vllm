@@ -17,6 +17,9 @@ class Qwen2Model(nn.Module):
         )
 
         self.norm = RMSNorm(config)
+        self.tie_word_embeddings = config.tie_word_embeddings
+        if not self.tie_word_embeddings:
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(self, input_ids, positions, sample_indices):
         x = self.embed_tokens(input_ids)
@@ -29,7 +32,7 @@ class Qwen2Model(nn.Module):
 
         logits = F.linear(
             x,
-            self.embed_tokens.weight,
+            self.embed_tokens.weight if self.tie_word_embeddings else self.lm_head.weight,
             bias=None
         )
 

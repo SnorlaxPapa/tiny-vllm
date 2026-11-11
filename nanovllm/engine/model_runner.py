@@ -11,16 +11,23 @@ from nanovllm.config import Config
 
 class ModelRunner:
 
-  def __init__(self, model_dir: str):
+  def __init__(self, model_dir: str, **config_kwargs):
     """initiate model, warm up, allocate kv cache for each attention layer"""
     self.hf_config = AutoConfig.from_pretrained(model_dir)
-    self.config = Config(model_dir)
+    self.config = Config(model_dir, **config_kwargs)
     self.model = load_model(model_dir)
     self.sampler = Sampler()
     self.warmup_model()
-    self.allocate_kv_cache()
+    if self.config.use_kv_cache:
+        self.allocate_kv_cache()
+    else:
+        self.config.num_kvcache_blocks = 0
+    self.graph_replays = 0
     if not self.config.enforce_eager:
-        self.capture_cuda_graph()
+        if self.config.use_kv_cache:
+            self.capture_cuda_graph()
+        else:
+            self.capture_no_cache_graph()
 
 
   def warmup_model(self):
@@ -51,7 +58,7 @@ class ModelRunner:
     peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"] #peak memory allocated for torch tensors
     current = torch.cuda.memory_stats()["allocated_bytes.all.current"] #current memory allocated for torch tensors
 
-    head_dim = self.hf_config.hidden_size // self.hf_config.num_attention_heads
+    head_dim = getattr(self.hf_config, "head_dim", None) or self.hf_config.hidden_size // self.hf_config.num_attention_heads
     dtype = next(self.model.parameters()).dtype
 
     block_bytes = (
@@ -63,7 +70,11 @@ class ModelRunner:
         dtype.itemsize
     )
 
-    self.config.num_kvcache_blocks = int(total * self.config.gpu_memory_utilization - used - peak + current) // block_bytes
+    available_blocks = int(total * self.config.gpu_memory_utilization - used - peak + current) // block_bytes
+    if self.config.num_kvcache_blocks <= 0:
+        self.config.num_kvcache_blocks = available_blocks
+    elif self.config.num_kvcache_blocks > available_blocks:
+        raise ValueError("Requested KV pool exceeds available memory budget")
     assert self.config.num_kvcache_blocks > 0, "Unable to allocate kv blocks, consider increasing gpu_memory_utilization"
 
     kv_cache_shape = (self.config.num_kvcache_blocks, self.config.kv_cache_block_size, self.hf_config.num_key_value_heads, head_dim)
@@ -236,15 +247,23 @@ class ModelRunner:
     graph_vars["context_lens"][:bs] = context.context_lens
     graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
     graph.replay()
+    self.graph_replays += 1
 
     return graph_vars["outputs"][:bs]
 
 
-  def run(self, scheduled_sequences: list[Sequence], is_prefill: bool) -> list[int]:
+  def run(self, scheduled_sequences: list[Sequence], is_prefill: bool, return_logits=False):
     """split based on prefill/eager decode and cuda graph decode"""
     try:
       #prefill or eager decode 
-      if is_prefill or self.config.enforce_eager:
+      if not self.config.use_kv_cache:
+        sample_indices, temperature = self.prepare_sample(scheduled_sequences)
+        if is_prefill or self.config.enforce_eager:
+          packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
+          logits = self.run_prefill_eager_decode(packed_tokens, positions, sample_indices)
+        else:
+          logits = self.run_no_cache_cuda(scheduled_sequences)
+      elif is_prefill or self.config.enforce_eager:
         if is_prefill:
           packed_tokens, positions = self.prepare_prefill(scheduled_sequences)
         else:
@@ -258,6 +277,8 @@ class ModelRunner:
         sample_indices, temperature = self.prepare_sample(scheduled_sequences)
         logits = self.run_cuda(packed_tokens, positions)
 
+      if return_logits:
+          return logits
       if all(seq.temperature == 0 for seq in scheduled_sequences):
           token_idxs = logits.argmax(dim=-1).tolist()
       else:
@@ -342,3 +363,54 @@ class ModelRunner:
 
 
       
+
+
+  @torch.inference_mode()
+  def capture_no_cache_graph(self):
+    """Single-request full-prefix graph with a fixed causal padded capacity.
+
+    Input/activation buffers persist, but no attention K/V is reused. Every
+    layer recomputes Q/K/V for every position on every graph replay. Future
+    padding cannot affect the sampled position under causal attention.
+    """
+    capacity = self.config.no_cache_graph_capacity
+    ids = torch.zeros(capacity, dtype=torch.long, device="cuda")
+    positions = torch.arange(capacity, device="cuda")
+    cu = torch.tensor([0, capacity], dtype=torch.int32, device="cuda")
+    sample = torch.tensor([capacity - 1], device="cuda")
+    output = torch.empty(1, self.hf_config.vocab_size,
+                         dtype=next(self.model.parameters()).dtype, device="cuda")
+    graph = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    set_context(is_prefill=True, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                max_seqlen_q=capacity, max_seqlen_k=capacity)
+    try:
+      with torch.cuda.stream(stream):
+        for _ in range(3):
+          output.copy_(self.model(ids, positions, sample))
+      torch.cuda.current_stream().wait_stream(stream)
+      torch.cuda.synchronize()
+      with torch.cuda.graph(graph, stream=stream):
+        output.copy_(self.model(ids, positions, sample))
+    finally:
+      reset_context()
+    torch.cuda.current_stream().wait_stream(stream)
+    self.no_cache_graph = graph
+    self.no_cache_vars = dict(ids=ids, positions=positions, cu=cu,
+                              sample=sample, output=output)
+
+  @torch.inference_mode()
+  def run_no_cache_cuda(self, sequences):
+    if len(sequences) != 1:
+      raise ValueError("No-cache graph requires batch size 1")
+    seq = sequences[0]
+    buffers = self.no_cache_vars
+    n = len(seq)
+    if n > buffers["ids"].numel():
+      raise ValueError("Sequence exceeds captured graph capacity")
+    buffers["ids"][:n].copy_(torch.tensor(seq.token_ids, device="cuda"))
+    buffers["sample"].fill_(n - 1)
+    self.no_cache_graph.replay()
+    self.graph_replays += 1
+    return buffers["output"]

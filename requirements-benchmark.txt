@@ -1,0 +1,11 @@
+# Install the Colab CUDA-compatible torch wheel first; do not install vLLM.
+transformers==4.51.3
+huggingface-hub>=0.30,<1
+safetensors>=0.5,<1
+numpy>=1.26,<3
+xxhash>=3.5,<4
+matplotlib>=3.8,<4
+pytest>=8,<9
+ninja
+packaging
+# Separately: MAX_JOBS=2 pip install flash-attn==2.7.4.post1 --no-build-isolation

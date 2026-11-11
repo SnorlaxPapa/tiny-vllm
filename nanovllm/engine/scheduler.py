@@ -6,10 +6,11 @@ from collections import deque
 class Scheduler:
 
     def __init__(self, config: Config):
+        self.use_kv_cache = config.use_kv_cache
         self.max_num_batch_tokens = config.max_num_batch_tokens
         self.max_num_seq = config.max_num_seqs
         self.eos = config.eos
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kv_cache_block_size)
+        self.block_manager = (BlockManager(config.num_kvcache_blocks, config.kv_cache_block_size, config.enable_prefix_caching) if self.use_kv_cache else None)
         self.block_size = config.kv_cache_block_size
         self.waiting = deque([])
         self.running = deque([])
@@ -33,6 +34,8 @@ class Scheduler:
 
     def schedule(self):
         """for simplicity, i utilize a homogenous scheduler """
+        if not self.use_kv_cache:
+            return self.schedule_no_cache()
         scheduled_sequences = []
         batched_tokens = 0
 
@@ -83,6 +86,11 @@ class Scheduler:
 
         self.running.extendleft(reversed(scheduled_sequences))
 
+        if not scheduled_sequences and not self.is_finished():
+            # Preemption may have just freed enough blocks for a fresh prefill.
+            if self.waiting and self.block_manager.can_allocate(self.waiting[0])[0] != -1:
+                return self.schedule()
+            raise RuntimeError("KV cache capacity cannot make scheduling progress")
         return scheduled_sequences, False
 
     def postprocess(self, scheduled_sequences: list[Sequence], output_tokens: list[int], is_prefill: bool):
@@ -91,7 +99,8 @@ class Scheduler:
             seq.num_computed_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
 
-            self.block_manager.hash_blocks(seq)
+            if self.use_kv_cache:
+                self.block_manager.hash_blocks(seq)
 
             if is_prefill and seq.num_computed_tokens != len(seq): continue #skip appending decoded token for chunks
             seq.append_token(token)
@@ -100,5 +109,40 @@ class Scheduler:
             reached_limit = seq.num_completion_tokens == seq.max_tokens
             if reached_completed or reached_limit:
                 seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
+                if self.use_kv_cache:
+                    self.block_manager.deallocate(seq)
                 self.running.remove(seq)
+
+
+    def schedule_no_cache(self):
+        """Same prefill-priority policy; recompute the entire prefix each iteration.
+
+        No block manager, prefix sharing, or chunked prefill: chunking would need
+        retained K/V. A running request still produces only one token per step.
+        """
+        scheduled = []
+        budget = self.max_num_batch_tokens
+        if self.waiting:
+            while self.waiting and len(scheduled) < self.max_num_seq:
+                seq = self.waiting[0]
+                if len(seq) > budget:
+                    break
+                self.waiting.popleft()
+                seq.status = SequenceStatus.RUNNING
+                self.running.append(seq)
+                scheduled.append(seq)
+                budget -= len(seq)
+            is_prefill = True
+        else:
+            for seq in self.running:
+                if len(scheduled) == self.max_num_seq or len(seq) > budget:
+                    break
+                scheduled.append(seq)
+                budget -= len(seq)
+            is_prefill = False
+        if not scheduled:
+            raise RuntimeError("Full-prefix recomputation exceeds the token budget")
+        for seq in scheduled:
+            seq.num_computed_tokens = 0
+            seq.num_scheduled_tokens = len(seq)
+        return scheduled, is_prefill

@@ -5,7 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
-from nanovllm.layers.rope import get_rope
+from nanovllm.layers.rope import get_rope, rope_theta
+from nanovllm.layers.norm import RMSNorm
 
 
 
@@ -138,12 +139,13 @@ class QKVProjection(nn.Module):
         num_attention_heads,
         num_kv_heads,
         head_dim,
+        bias=True,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.linear = nn.Linear(hidden_shape, (num_attention_heads + 2 * num_kv_heads) * head_dim, bias=True)
+        self.linear = nn.Linear(hidden_shape, (num_attention_heads + 2 * num_kv_heads) * head_dim, bias=bias)
 
 
     def forward(self, hidden):
@@ -175,10 +177,13 @@ class Qwen2Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = config.rope_parameters["rope_theta"]
+        self.rope_theta = rope_theta(config)
         self.max_position_embeddings = config.max_position_embeddings
         self.is_causal = True
-        self.qkv_proj = QKVProjection(self.hidden_size, config.num_attention_heads, config.num_key_value_heads, self.head_dim)
+        self.qkv_proj = QKVProjection(self.hidden_size, config.num_attention_heads, config.num_key_value_heads, self.head_dim, bias=getattr(config, "attention_bias", config.model_type != "qwen3"))
+        if config.model_type == "qwen3":
+            self.q_norm = RMSNorm(config, self.head_dim)
+            self.k_norm = RMSNorm(config, self.head_dim)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.attn = AttentionInterface(self.num_heads, self.head_dim, self.scaling, self.num_kv_heads)
         self.rotate = get_rope(self.head_dim, self.head_dim, self.max_position_embeddings, self.rope_theta)
@@ -192,6 +197,9 @@ class Qwen2Attention(nn.Module):
     ):
         #get qkv projections
         q, k, v = self.qkv_proj(hidden_states)
+
+        if self.config.model_type == "qwen3":
+            q, k = self.q_norm(q), self.k_norm(k)
 
         #rotate qk
         q, k = self.rotate(positions, q, k)

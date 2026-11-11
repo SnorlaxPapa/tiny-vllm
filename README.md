@@ -1,5 +1,21 @@
 # nanovLLM
 
+## Qwen3-4B KV cache ablation (new)
+
+Qwen3-4B support, `use_kv_cache=False` full-prefix recomputation, and a controlled
+Colab A100 benchmark are available. Both arms retain iterative scheduling and
+CUDA graph decode. The experiment sweeps **input lengths 64–32,768**, generates
+128 output tokens, and uses seed 42.
+
+- [Detailed reproduction guide, methodology, metric definitions and limitations](benchmarks/kv_cache/README.md)
+- [Run in Colab](https://colab.research.google.com/github/SnorlaxPapa/tiny-vllm/blob/feat/qwen3-kv-cache-ablation/benchmarks/kv_cache/colab_a100.ipynb)
+- [A100 configuration](benchmarks/kv_cache/a100.json)
+
+**A100 measurements are pending:** the scripts generate raw CSVs, measured plots
+and a results README after you run them. No new GPU results are claimed here.
+The older results below are for Qwen2.5 and a different experiment.
+
+
 Hello! Thanks for taking a look at my educational nanovLLM project. Here's a summary if you're in a hurry! 
 This project replicates vLLM's internals, including iterative scheduling, prefix sharing, chunked prefill, paged KV cache management, and non-eager execution via CUDA graph capture. For my model, I replicated Qwen2.5-3B-Instruct's architecture in Pytorch while fusing the weights for QKV projections and SwiGLU up/gate projections. 
 

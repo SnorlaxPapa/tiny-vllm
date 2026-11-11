@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local benchmark inputs and measurements (publish selected results explicitly)
+checkpoints/
+results/
+benchmarks/kv_cache/*.local.json
+.venv-benchmark/

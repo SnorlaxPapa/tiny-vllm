@@ -22,7 +22,8 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, enable_prefix_caching=True):
+        self.enable_prefix_caching = enable_prefix_caching
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.blocks = [Block(i) for i in range(num_blocks)]
@@ -69,6 +70,8 @@ class BlockManager:
 
     def _find_longest_prefix(self, seq: Sequence):
         """Given a sequence, finds the longest cached prefix"""
+        if not self.enable_prefix_caching:
+            return []
         token_ids = seq.token_ids
         prefix = -1
         blocks = []
@@ -140,6 +143,8 @@ class BlockManager:
 
     def hash_blocks(self, seq: Sequence):
         """Hash and register fully filled blocks"""
+        if not self.enable_prefix_caching:
+            return
         start = seq.num_hashed_tokens // self.block_size
         end = seq.num_computed_tokens // self.block_size
 
